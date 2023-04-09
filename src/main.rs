@@ -14,11 +14,6 @@ use std::{
 };
 use tempfile::TempDir;
 
-struct Job {
-	url: String,
-	name: String,
-}
-
 fn get_repo_page(token: &str, username: &str, page: u16) -> Result<RequestBuilder, Box<dyn Error>> {
 	let api_url = Url::parse(&format!(
 		"https://api.github.com/users/{username}/repos?per_page=20&page={}",
@@ -66,34 +61,19 @@ fn get_user_identifiers(token: &str, username: &str) -> Result<User, Box<dyn Err
 		.json()?)
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct Job {
+	git_url: String,
+	name: String,
+}
+
+// Don't turn the response into text and then deserialize it, use `.json()` directly and return an
+// error if the deserialization fails.
 fn get_git_urls(rb: RequestBuilder) -> Result<Vec<Job>, Box<dyn Error>> {
-	let mut urls = Vec::new();
-	let res = rb
+	Ok(rb
 		.send()
 		.expect("request to /{user}/repos failed")
-		.text()
-		.expect("Conversion to String failed for respositories");
-	let json: Vec<Value> = serde_json::from_str(&res).expect("Failed to convert response to JSON");
-	for repo in json.iter() {
-		let url = repo
-			.get("git_url")
-			.expect("Failed to get 'git_url' from JSON object")
-			.to_string();
-		let name = repo
-			.get("name")
-			.expect("Failed to get name from JSON resoponse")
-			.to_string();
-		// println!("{}", &url[7..url.len() - 1]);
-		urls.push(Job {
-			url: url
-				.trim_matches('"')
-				.replace("git:", "http:")
-				.to_owned(),
-			name: name.trim_matches('"').to_owned(),
-		});
-	}
-
-	Ok(urls)
+		.json()?)
 }
 
 fn main() -> Result<(), reqwest::Error> {
