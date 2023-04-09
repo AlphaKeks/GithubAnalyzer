@@ -36,42 +36,34 @@ fn get_repo_page(token: &str, username: &str, page: u16) -> Result<RequestBuilde
 		.bearer_auth(token.trim_end()));
 }
 
-fn get_user_identifiers(token: &str, username: &str) -> Result<Vec<String>, Box<dyn Error>> {
-	let mut out: Vec<String> = Vec::new();
-	let api_url = format!("https://api.github.com/users/{username}");
+// Use a struct for deserializing rather than `serde_json::Value`
+#[derive(Debug, serde::Deserialize)]
+struct User {
+	email: String,
+	name: String,
+}
+
+// 1. Don't return a `Vec` with 2 elements. Use a tuple instead: `-> Result<(String, String)>`
+// 2. Even better: return a struct with named fields if you're deserializing json.
+// 3. Make the function fail if GitHub's response was incomplete/incorrect/empty/whatever instead of
+//    returning an empty Vec.
+// 4. You can deserialize the response directly with `.json()`
+fn get_user_identifiers(token: &str, username: &str) -> Result<User, Box<dyn Error>> {
+	// not _that_ important if your URL is essentially static, but good practice to validate as much
+	// as possible
+	let api_url = Url::parse(&format!("https://api.github.com/users/{username}"))?;
+
 	let mut headers = HeaderMap::new();
 	headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
 	headers.insert("X-GitHub-Api-Version", HeaderValue::from_static("2022-11-28"));
 	headers.insert(USER_AGENT, HeaderValue::from_static("KauMah"));
-	let res = Client::new()
-		.get(&api_url)
+
+	Ok(Client::new()
+		.get(api_url)
 		.headers(headers)
 		.bearer_auth(token.trim_end())
-		.send()
-		.expect("Request to /users/<username> failed")
-		.text()
-		.expect("Conversion to text failed for user");
-
-	let val: Value = serde_json::from_str(&res)
-		.expect("Failed to parse JSON from response for GET users/{username}");
-	// let pretty = serde_json::to_string_pretty(&val).expect("pls");
-	// println!("{}", pretty);
-	let email = val
-		.get("email")
-		.expect("Failed to parse string <email> from JSON")
-		.to_string();
-	let name = val
-		.get("name")
-		.expect("Failed to parse string <name> from JSON")
-		.to_string();
-	if name.ne("null") {
-		out.push(name.trim_matches('"').to_owned())
-	};
-	if email.ne("null") {
-		out.push(email.trim_matches('"').to_owned())
-	};
-
-	return Ok(out);
+		.send()?
+		.json()?)
 }
 
 fn get_git_urls(rb: RequestBuilder) -> Result<Vec<Job>, Box<dyn Error>> {
