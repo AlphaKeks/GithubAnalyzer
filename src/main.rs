@@ -4,7 +4,7 @@ use reqwest::{
 	header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT},
 	Url,
 };
-use serde_json::Value;
+
 use std::io;
 use std::{error::Error, io::Write, process::Command};
 use std::{
@@ -43,7 +43,7 @@ struct User {
 // 3. Make the function fail if GitHub's response was incomplete/incorrect/empty/whatever instead of
 //    returning an empty Vec.
 // 4. You can deserialize the response directly with `.json()`
-fn get_user_identifiers(token: &str, username: &str) -> Result<User, Box<dyn Error>> {
+fn get_user(token: &str, username: &str) -> Result<User, Box<dyn Error>> {
 	// not _that_ important if your URL is essentially static, but good practice to validate as much
 	// as possible
 	let api_url = Url::parse(&format!("https://api.github.com/users/{username}"))?;
@@ -76,7 +76,7 @@ fn get_git_urls(rb: RequestBuilder) -> Result<Vec<Job>, Box<dyn Error>> {
 		.json()?)
 }
 
-fn main() -> Result<(), reqwest::Error> {
+fn main() -> Result<(), Box<dyn Error>> {
 	println!("Initializing - Github Analyzer...");
 	let token = fs::read_to_string("./token").expect("Could not read token form ./token");
 
@@ -92,69 +92,75 @@ fn main() -> Result<(), reqwest::Error> {
 	// end clear terminal
 
 	let mut git_repo_jobs: Vec<Job> = Vec::new();
-	let mut page: u16 = 1;
-	loop {
-		let req =
-			get_repo_page(&token, &username, page).expect("Something went wrong building the URL");
-		let new_urls = get_git_urls(req).expect("msg");
-		if new_urls.len() == 0 {
+
+	for page in 1.. {
+		let page = get_repo_page(&token, &username, page)?;
+		let jobs = get_git_urls(page)?;
+
+		if jobs.is_empty() {
 			break;
 		}
-		git_repo_jobs.extend(new_urls);
-		page = page + 1;
+
+		git_repo_jobs.extend(jobs);
 	}
 
-	// git_urls
-	//     .into_iter()
-	//     .map(|job| println!("Name: {}\tUrl: {}", job.name, job.url))
-	//     .collect::<Vec<_>>();
-	let identifiers =
-		Arc::new(get_user_identifiers(&token, &username).expect("function get_user_email failed"));
-	identifiers
-		.iter()
-		.for_each(|id| println!("{}", id));
-	if identifiers.len() < 1 {
-		panic!("No identifiers found for user for parsing repos, consider using option --searchName [<names>...]");
-		// TODO: add the ability to use --searchName when running. This is such a later problem
-	}
+	let user = get_user(&token, &username).expect("No identifiers found for user for parsing repos, consider using option --searchName [<names>...]");
 
-	let output_file = Arc::new(Mutex::new(
-		std::fs::File::create(format!("{}.csv", username.trim()))
-			.expect("Failed to create output.csv"),
-	));
-	let dir_path = Arc::new(TempDir::new().expect("Failed to create a temporary directory"));
-	let identifier_str = format!("--author={}", identifiers.join("|"));
+	let user = Arc::new(user);
+
+	let output_file =
+		Arc::new(Mutex::new(std::fs::File::create(format!("{}.csv", username.trim()))?));
+
+	let dir_path = Arc::new(TempDir::new()?);
+
+	let identifier_str = format!("--author={}|{}", user.name, user.email);
+
 	// --------------------------------------------------------------------------------------------- Start Job
 
-	let job_queue: Arc<Injector<Job>> = Arc::new(Injector::new());
+	let job_queue: Arc<Injector<Job>> = Arc::default();
 	for repo in git_repo_jobs {
 		job_queue.push(repo);
 	}
-	let stealers: Arc<Mutex<Vec<Stealer<Job>>>> = Arc::new(Mutex::new(Vec::new()));
+
+	let stealers: Arc<Mutex<Vec<Stealer<Job>>>> = Arc::default();
+
 	let mut handles = Vec::new();
-	for i in 0..4 {
-		let job_queue = job_queue.clone();
-		let stealers = stealers.clone();
-		let dir_path = dir_path.clone();
+
+	for _ in 0..4 {
+		// It's convention that you use fully qualified syntax when cloning an `Arc` or similar
+		// containers so it's obvious that you're only doing a shallow clone. This also avoids
+		// potentially conflicting `Clone` implementations.
+		let job_queue = Arc::clone(&job_queue);
+		let stealers = Arc::clone(&stealers);
+		let dir_path = Arc::clone(&dir_path);
 		let identifier_str = identifier_str.clone();
-		let output_file = output_file.clone();
+		let output_file = Arc::clone(&output_file);
+
 		let handle = thread::spawn(move || {
 			let worker: Worker<Job> = Worker::new_fifo();
+
 			{
 				stealers
 					.lock()
 					.unwrap()
 					.push(worker.stealer());
 			}
-			let _ = job_queue.steal_batch(&worker);
+
+			_ = job_queue.steal_batch(&worker);
+
 			loop {
-				if !worker.is_empty() {
-					let job = worker.pop().unwrap();
+				if !job_queue.is_empty() {
+					_ = job_queue.steal_batch(&worker);
+					continue;
+				}
+
+				while let Some(job) = worker.pop() {
 					let path = dir_path.path().join(job.name.clone());
 
-					let clone = Command::new("git")
-						.args(["clone", job.url.as_str()])
-						.current_dir(dir_path.path().to_str().unwrap())
+					// Clone repo
+					Command::new("git")
+						.args(["clone", &job.git_url])
+						.current_dir(&*dir_path)
 						.status()
 						.expect("Failed to clone repo");
 
@@ -170,50 +176,37 @@ fn main() -> Result<(), reqwest::Error> {
 							"--date=unix",
 							"--numstat",
 						])
-						.current_dir(path.clone().to_str().unwrap())
+						.current_dir(&*path)
 						.output()
 						.expect("Failed to show git log");
 
 					let output = String::from_utf8_lossy(&output.stdout);
-					let lines = output.lines();
+
 					let mut num_files = 0;
 					let mut num_lines_added = 0;
 					let mut num_lines_deleted = 0;
 					let mut timestamp: &str = "";
 					let mut hash: &str = "";
-					for line in lines {
+
+					for line in output.lines() {
 						let words = line
 							.split_whitespace()
-							.collect::<Vec<_>>();
-						let words = words
-							.into_iter()
 							.map(|st| st.trim_matches('"'))
 							.collect::<Vec<_>>();
-						let first = words.get(0);
-						match first {
+
+						match words.get(0) {
+							Some(term) if term.len() == 40 => {
+								hash = term;
+								timestamp = words
+									.get(1)
+									.expect("Failed to get timestamp.");
+							}
 							Some(term) => {
-								if term.len() == 40 {
-									hash = term;
-									timestamp = words.get(1).unwrap();
-								// println!("Hash: {}, ts: {}", hash, timestamp);
-								} else {
-									num_files += 1;
-									num_lines_added += match term.parse::<u32>() {
-										Ok(val) => val,
-										Err(_) => 0,
-									};
-									num_lines_deleted += match words.get(1).unwrap().parse::<u32>()
-									{
-										Ok(val) => val,
-										Err(_) => 0,
-									}
-								}
+								num_files += 1;
+								num_lines_added += term.parse().unwrap_or(0);
+								num_lines_deleted += term.parse().unwrap_or(0);
 							}
 							None => {
-								// println!(
-								//     "Files: {}, added: {}, removed: {}",
-								//     num_files, num_lines_added, num_lines_deleted
-								// );
 								output_file
 									.lock()
 									.unwrap()
@@ -235,7 +228,9 @@ fn main() -> Result<(), reqwest::Error> {
 							}
 						};
 					}
-					let _del = Command::new("rm").args(["-rf", path.to_str().unwrap()]);
+
+					Command::new("rm").args(["-rf", path.to_str().unwrap()]);
+
 					output_file
 						.lock()
 						.unwrap()
@@ -247,31 +242,31 @@ fn main() -> Result<(), reqwest::Error> {
 							.as_bytes(),
 						)
 						.expect("Failed to write to file");
-				} else if !job_queue.is_empty() {
-					let _ = job_queue.steal_batch(&worker);
-					continue;
-				} else {
-					let mut has_stolen = false;
-					for stealer in stealers
-						.lock()
-						.unwrap()
-						.to_owned()
-						.into_iter()
-					{
-						if !stealer.is_empty() {
-							let _ = stealer.steal_batch(&worker);
-							has_stolen = true;
-							break;
-						}
-					}
-					if !has_stolen {
+				}
+
+				let mut has_stolen = false;
+
+				for stealer in stealers
+					.lock()
+					.expect("Mutex got poisoned.")
+					.iter()
+				{
+					if !stealer.is_empty() {
+						_ = stealer.steal_batch(&worker);
+						has_stolen = true;
 						break;
 					}
 				}
+
+				if !has_stolen {
+					break;
+				}
 			}
 		});
+
 		handles.push(handle);
 	}
+
 	for handle in handles {
 		handle.join().unwrap();
 	}
