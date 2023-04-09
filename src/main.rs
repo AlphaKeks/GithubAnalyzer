@@ -79,12 +79,6 @@ struct Job {
     name: String,
 }
 
-// Don't turn the response into text and then deserialize it, use `.json()` directly and return an
-// error if the deserialization fails.
-fn get_git_urls(rb: RequestBuilder) -> Result<Vec<Job>, Box<dyn Error>> {
-    Ok(rb.send().expect("request to /{user}/repos failed").json()?)
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Initializing - Github Analyzer...");
     let token = fs::read_to_string("./token").expect("Could not read token form ./token");
@@ -100,11 +94,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
     // end clear terminal
 
-    let mut git_repo_jobs: Vec<Job> = Vec::new();
+    let mut git_repo_jobs = Vec::new();
 
     for page in 1.. {
         let page = get_repo_page(&token, &username, page)?;
-        let jobs = get_git_urls(page)?;
+        let jobs = page.send()?.json::<Vec<Job>>()?;
 
         if jobs.is_empty() {
             break;
