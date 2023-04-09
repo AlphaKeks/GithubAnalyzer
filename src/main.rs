@@ -2,6 +2,7 @@ use crossbeam::deque::{Injector, Stealer, Worker};
 use reqwest::{
 	blocking::{Client, RequestBuilder},
 	header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT},
+	Url,
 };
 use serde_json::Value;
 use std::io;
@@ -19,17 +20,20 @@ struct Job {
 }
 
 fn get_repo_page(token: &str, username: &str, page: u16) -> Result<RequestBuilder, Box<dyn Error>> {
-	let api_url =
-		format!("https://api.github.com/users/{username}/repos?per_page=20&page={}", page);
+	let api_url = Url::parse(&format!(
+		"https://api.github.com/users/{username}/repos?per_page=20&page={}",
+		page
+	))?;
+
 	let mut headers = HeaderMap::new();
 	headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
 	headers.insert("X-GitHub-Api-Version", HeaderValue::from_static("2022-11-28"));
 	headers.insert(USER_AGENT, HeaderValue::from_static("KauMah"));
-	let req = Client::new()
-		.get(&api_url)
+
+	return Ok(Client::new()
+		.get(api_url)
 		.headers(headers)
-		.bearer_auth(token.trim_end());
-	return Ok(req);
+		.bearer_auth(token.trim_end()));
 }
 
 fn get_user_identifiers(token: &str, username: &str) -> Result<Vec<String>, Box<dyn Error>> {
